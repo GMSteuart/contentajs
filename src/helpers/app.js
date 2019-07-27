@@ -19,6 +19,23 @@ const healthcheck = require('../routes/healthcheck');
 const jsonrpcProxy = require('../routes/jsonrpcProxy');
 const proxyHandler = require('../routes/proxyHandler');
 const { initSubrequests } = require('../routes/subrequests');
+const apolloServerWithContext = require('./graphql/apolloServerWithContext');
+const axios = require('axios');
+const https = require('https');
+
+// Create an axios instance to disable ssl for development
+const axiosInstance = axios.create({
+  httpsAgent: new https.Agent({
+    rejectUnauthorized: false,
+  }),
+});
+
+// Transform request function to send data via x-www-form-urlencoded
+// since thats what Drupal JSON:API accepts
+const transformRequest = (jsonData = {}) =>
+  Object.entries(jsonData)
+    .map(x => `${encodeURIComponent(x[0])}=${encodeURIComponent(x[1])}`)
+    .join('&');
 
 module.exports = async (cmsMeta: Object) => {
   const app = express();
@@ -30,6 +47,37 @@ module.exports = async (cmsMeta: Object) => {
   const jsonApiPrefix = _.get(cmsMeta, 'jsonApiPrefix', '/jsonapi');
   const jsonApiPaths = JSON.parse(_.get(cmsMeta, 'jsonApiPaths', '[]'));
   const cmsHost = config.get('cms.host');
+  const client_id = config.get('cms.client_id');
+
+  // Get a jwt token to pass along with the requests
+  const {
+    data: { token_type, expires_in, access_token },
+  } = await axiosInstance.post(
+    `${cmsHost}/oauth/token`,
+    {
+      grant_type: 'client_credentials',
+      client_id,
+    },
+    {
+      transformRequest: data => transformRequest(data),
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+    }
+  );
+
+  const apolloServer = await apolloServerWithContext({
+    cmsHost,
+    jsonApiPrefix,
+    access_token,
+    client_id,
+  });
+
+  apolloServer.applyMiddleware({
+    app,
+    path: '/graphql',
+    bodyParserConfig: true,
+  });
 
   // Set the global agent options
   const agentOptions = config.util.toObject(config.get('cms.httpAgent'));
